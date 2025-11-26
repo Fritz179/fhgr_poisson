@@ -18,12 +18,22 @@ from threading import Lock
 import cv2
 import numpy as np
 from pynput import keyboard
+import pigpio  # pigpiod daemon needed on the Pi for GPIO output
 
 FONT = cv2.FONT_HERSHEY_DUPLEX
 FONT_SCALE = 1
 FONT_THICKNESS = 1
 WHITE = (255, 255, 255)
 ACTIVE_COLOR = (0, 200, 0)
+
+LEFT_PIN = 17
+RIGHT_PIN = 27
+MOTOR_PIN = 22
+PWM_FREQUENCY = 50  # Hz, typical for servos/ESCs
+
+
+def clamp(value, min_value, max_value):
+    return max(min_value, min(max_value, value))
 
 def write_text(img, text, position, color=WHITE):
     cv2.putText(img, text, position, FONT, FONT_SCALE, color, FONT_THICKNESS, cv2.LINE_4)
@@ -152,103 +162,126 @@ def main():
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
+    pi = None
+    try:
 
+        pi = pigpio.pi()
+        if not pi.connected:
+            raise RuntimeError("pigpio daemon not running; start it with 'sudo systemctl enable --now pigpiod'.")
 
-    prev_time = time.time()
+        for pin in (LEFT_PIN, RIGHT_PIN, MOTOR_PIN):
+            pi.set_mode(pin, pigpio.OUTPUT)
+            pi.set_PWM_frequency(pin, PWM_FREQUENCY)
 
-    while running:
-        current_time = time.time()
-        delta_time = current_time - prev_time
-        prev_time = current_time
+        # Safe neutral on start
+        pi.set_servo_pulsewidth(LEFT_PIN, 1500)
+        pi.set_servo_pulsewidth(RIGHT_PIN, 1500)
+        pi.set_servo_pulsewidth(MOTOR_PIN, 1500)
 
-        with keys_lock:
-            active_keys = set(pressed_keys)
+        prev_time = time.time()
 
-        direction_rate = 80.0  # units per second while holding W/A/S/D
-        speed_rate = 60.0  # units per second while holding Q/E
+        while running:
+            current_time = time.time()
+            delta_time = current_time - prev_time
+            prev_time = current_time
 
-        up = " " if alternate_mode else "s"
-        down = "shift" if alternate_mode else "w"
+            with keys_lock:
+                active_keys = set(pressed_keys)
 
-        if invert_pitch:
-            [up, down] = [down, up]
+            direction_rate = 80.0  # units per second while holding W/A/S/D
+            speed_rate = 60.0  # units per second while holding Q/E
 
-        if down in active_keys:
-            pitch += direction_rate * delta_time
-        if up in active_keys:
-            pitch -= direction_rate * delta_time
+            up = " " if alternate_mode else "s"
+            down = "shift" if alternate_mode else "w"
 
-        if "a" in active_keys:
-            roll -= direction_rate * delta_time
-        if "d" in active_keys:
-            roll += direction_rate * delta_time
+            if invert_pitch:
+                [up, down] = [down, up]
 
-        forward = "w" if alternate_mode else "e"
-        backward = "s" if alternate_mode else "q"
+            if down in active_keys:
+                pitch += direction_rate * delta_time
+            if up in active_keys:
+                pitch -= direction_rate * delta_time
 
-        if backward in active_keys:
-            speed -= speed_rate * delta_time
-        if forward in active_keys:
-            speed += speed_rate * delta_time
+            if "a" in active_keys:
+                roll -= direction_rate * delta_time
+            if "d" in active_keys:
+                roll += direction_rate * delta_time
 
-        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+            forward = "w" if alternate_mode else "e"
+            backward = "s" if alternate_mode else "q"
 
-        write_text(img, "Poisson Robot Control", (10, 30))
-        draw_key_hint(img, 10, 70, [up, down], "Move Up/Down", active_keys)
-        draw_key_hint(img, 10, 110, ["a", "d"], "Move Left/Right", active_keys)
-        draw_key_hint(img, 10, 150, [backward, forward], "Increase/Decrease Speed", active_keys)
-        draw_key_hint(img, 10, 190, [("Enter", "enter")], "Stop All Movement", active_keys)
-        draw_key_hint(img, 10, 230, ["i"], "Invert flight mode", active_keys)
-        draw_key_hint(img, 10, 270, ["o"], "Toggle Alternate Mode", active_keys)
+            if backward in active_keys:
+                speed -= speed_rate * delta_time
+            if forward in active_keys:
+                speed += speed_rate * delta_time
 
-        draw_heading(img, 640, 360, roll, pitch, speed)
+            img = np.zeros((720, 1280, 3), dtype=np.uint8)
 
-        # Clamp values
-        pitch = max(-100, min(100, pitch))
-        roll = max(-100, min(100, roll))
-        speed = max(-100, min(100, speed))
+            write_text(img, "Poisson Robot Control", (10, 30))
+            draw_key_hint(img, 10, 70, [up, down], "Move Up/Down", active_keys)
+            draw_key_hint(img, 10, 110, ["a", "d"], "Move Left/Right", active_keys)
+            draw_key_hint(img, 10, 150, [backward, forward], "Increase/Decrease Speed", active_keys)
+            draw_key_hint(img, 10, 190, [("Enter", "enter")], "Stop All Movement", active_keys)
+            draw_key_hint(img, 10, 230, ["i"], "Invert flight mode", active_keys)
+            draw_key_hint(img, 10, 270, ["o"], "Toggle Alternate Mode", active_keys)
 
-        # Important: sqrt(pitch^2 + roll^2) <= 100
-        magnitude = (pitch ** 2 + roll ** 2) ** 0.5
-        if magnitude > 100:
-            scale = 100 / magnitude
-            pitch *= scale
-            roll *= scale
+            draw_heading(img, 640, 360, roll, pitch, speed)
 
-        # 1ms = full left, 1.5ms = middle, 2ms = full right
+            # Clamp values
+            pitch = max(-100, min(100, pitch))
+            roll = max(-100, min(100, roll))
+            speed = max(-100, min(100, speed))
 
-        left_value = pitch - roll
-        right_value = pitch + roll
+            # Important: sqrt(pitch^2 + roll^2) <= 100
+            magnitude = (pitch ** 2 + roll ** 2) ** 0.5
+            if magnitude > 100:
+                scale = 100 / magnitude
+                pitch *= scale
+                roll *= scale
 
-        motor_pwm = 1500 + speed * 5
-        left_pwm = 1500 + left_value * 5
-        right_pwm = 1500 + right_value * 5
+            # 1ms = full left, 1.5ms = middle, 2ms = full right
 
-        left_angle = left_value * 0.9
-        right_angle = right_value * 0.9
+            left_value = pitch - roll
+            right_value = pitch + roll
 
-        write_text(img, f"Pitch: {int(round(pitch))}", (10, 310))
-        write_text(img, f"Roll: {int(round(roll))}", (10, 350))
-        write_text(img, f"Speed: {int(round(speed))}", (10, 390))
+            motor_pwm = clamp(1500 + speed * 5, 1000, 2000)
+            left_pwm = clamp(1500 + left_value * 5, 1000, 2000)
+            right_pwm = clamp(1500 + right_value * 5, 1000, 2000)
 
-        write_text(img, f"Left Servo: Angle: {left_angle:.0f}deg, PWM: {left_pwm:.0f}us", (10, 590))
-        write_text(img, f"Right Servo: Angle: {right_angle:.0f}deg, PWM: {right_pwm:.0f}us", (10, 630))
-        write_text(img, f"Motor: Speed: {int(round(speed))}, PWM: {motor_pwm:.0f}us", (10, 670))
-        write_text(img, "ESC to exit", (10, 710))
+            left_angle = left_value * 0.9
+            right_angle = right_value * 0.9
 
+            write_text(img, f"Pitch: {int(round(pitch))}", (10, 310))
+            write_text(img, f"Roll: {int(round(roll))}", (10, 350))
+            write_text(img, f"Speed: {int(round(speed))}", (10, 390))
 
-        # Hide opencv window decorations
-        key = cv2.waitKey(1)
-        if key == 27:
-            break
-        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        cv2.imshow(window_name, img)
+            write_text(img, f"Left Servo: Angle: {left_angle:.0f}deg, PWM: {left_pwm:.0f}us", (10, 590))
+            write_text(img, f"Right Servo: Angle: {right_angle:.0f}deg, PWM: {right_pwm:.0f}us", (10, 630))
+            write_text(img, f"Motor: Speed: {int(round(speed))}, PWM: {motor_pwm:.0f}us", (10, 670))
+            write_text(img, "ESC to exit", (10, 710))
 
+            # Push updated PWM values to the pins
+            pi.set_servo_pulsewidth(LEFT_PIN, left_pwm)
+            pi.set_servo_pulsewidth(RIGHT_PIN, right_pwm)
+            pi.set_servo_pulsewidth(MOTOR_PIN, motor_pwm)
 
-    listener.stop()
-    listener.join()
+            # Hide opencv window decorations
+            key = cv2.waitKey(1)
+            if key == 27:
+                break
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            cv2.imshow(window_name, img)
 
-    cv2.destroyWindow(window_name)
+    finally:
+        listener.stop()
+        listener.join()
+        if pi:
+            # Stop pulses and release pigpio
+            pi.set_servo_pulsewidth(LEFT_PIN, 0)
+            pi.set_servo_pulsewidth(RIGHT_PIN, 0)
+            pi.set_servo_pulsewidth(MOTOR_PIN, 0)
+            pi.stop()
+        cv2.destroyWindow(window_name)
 
 
 if __name__ == "__main__":
