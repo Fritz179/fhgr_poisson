@@ -19,22 +19,42 @@ I = invert flight mode
 # Create an opencv window and display text
 
 import time
-from threading import Lock
+from threading import Lock, Thread
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from pynput import keyboard
-
 import socket
+
+from gauges import draw_attitude_indicator, draw_legacy_gauge
+
 
 WHITE = (255, 255, 255)
 ACTIVE_COLOR = (0, 200, 0)
 WARNING_COLOR = (0, 0, 255)
+CONNECTING_COLOR = (255, 165, 0)
+DISCONNECTED_COLOR = (255, 64, 64)
 
 WIDTH = 3408
 HEIGHT = 2130
 TEXT_SIZE = 40
+STATE_TIMEOUT = 5.0
+
+@dataclass
+class State:
+    roll: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+    throttle: float = 0.0
+
+    def as_msg(self) -> bytes:
+        return f"{self.roll:.2f},{self.pitch:.2f},{self.yaw:.2f},{self.throttle:.2f}".encode()
+
+
+command_state = State()
+display_state = State()
 
 
 def clamp(value, min_value, max_value):
@@ -96,21 +116,8 @@ def draw_key_hint(draw, x, y, keys, description, active_keys, font):
     current_x += 15
     write_text(draw, f": {description}", (current_x, y), font)
 
-
-def draw_heading(img, x, y, dx, dy, throttle):
-    radius = 100
-
-    cv2.circle(img, (x, y), radius, (51, 51, 51), 2)  # Outline
-
-    throttle_color = (255, 255, 255) if throttle >= 0 else (255, 0, 0)
-    throttle_radius = int(round(abs(throttle)))
-    cv2.circle(img, (x, y), throttle_radius, throttle_color, -1)  # Throttle fill
-    cv2.circle(img, (x, y), 5, (0, 0, 255), -1)  # Center
-
-    cv2.arrowedLine(img, (x, y), (int(x + dx), int(y + dy)), (0, 255, 0), 2, cv2.LINE_AA, 0, 0.2)
-
-
 def main():
+    global display_state, command_state
     window_name = "Poisson Robot Control"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
@@ -120,6 +127,8 @@ def main():
     yaw = 0.0  # -100 to 100
     throttle = 0.0  # -100 to 100
     # Important: sqrt(pitch^2 + roll^2) <= 100
+    command_state = State()
+    display_state = State()
 
     direction_rate = 80.0  # units per second while holding W/A/S/D
     yaw_rate = 80.0  # units per second while holding Q/E
@@ -221,8 +230,61 @@ def main():
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     PI_ADDR = ("poisson.local", 5005)
+    sock.settimeout(0.1)
+    sock_connected = False
+    connect_error = None
+    last_connect_attempt = 0.0
 
-    prev_time = time.time()
+    start_time = time.time()
+    prev_time = start_time
+    last_received_time = None
+    display_state = command_state
+
+    def ensure_connected(force=False):
+        nonlocal sock_connected, connect_error, last_connect_attempt
+        now = time.time()
+        if sock_connected and not force:
+            return
+        if not force and (now - last_connect_attempt) < 1.0:
+            return
+        last_connect_attempt = now
+        try:
+            sock.connect(PI_ADDR)
+            sock_connected = True
+            connect_error = None
+        except OSError as exc:
+            sock_connected = False
+            connect_error = str(exc)
+
+    def receive_loop():
+        nonlocal last_received_time, sock_connected, connect_error
+        global display_state
+
+        while running:
+            if not sock_connected:
+                ensure_connected()
+                time.sleep(0.1)
+                continue
+
+            try:
+                data = sock.recv(1024)
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                sock_connected = False
+                connect_error = str(exc)
+                continue
+
+            try:
+                r, p, y, t = [float(x) for x in data.decode().split(",")]
+            except ValueError:
+                continue
+
+            display_state = State(r, p, y, t)
+            last_received_time = time.time()
+
+    receiver_thread = Thread(target=receive_loop, daemon=True)
+    receiver_thread.start()
 
     try:
         while running:
@@ -277,9 +339,28 @@ def main():
                 pitch *= limit_scale
                 roll *= limit_scale
 
+            command_state = State(roll, pitch, yaw, throttle)
+
+            now = time.time()
+
+            rx_fresh = last_received_time is not None and (now - last_received_time) <= STATE_TIMEOUT
+            if not rx_fresh:
+                display_state = command_state
+
+            render_state = display_state
+            display_roll = render_state.roll
+            display_pitch = render_state.pitch
+            display_yaw = render_state.yaw
+            display_throttle = render_state.throttle
+
             img = np.zeros((render_height, render_width, 3), dtype=np.uint8)
 
-            draw_heading(img, render_width // 2, render_height // 2, roll, pitch, throttle)
+            gauge_radius = max(60, int(min(render_width, render_height) * 0.18))
+            legacy_center = (int(render_width * 0.32), render_height // 2)
+            attitude_center = (int(render_width * 0.68), render_height // 2)
+
+            draw_legacy_gauge(legacy_center, gauge_radius, img, display_roll, display_pitch, display_throttle)
+            draw_attitude_indicator(attitude_center, gauge_radius, img, display_roll, display_pitch)
 
             pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             draw = ImageDraw.Draw(pil_img)
@@ -287,13 +368,25 @@ def main():
             margin = sv(10)
             header_y = margin
             title_gap = max(line_spacing, int(title_font_size * 1.1))
-            warning_y = header_y + title_gap
+            status_lines = []
+            if rx_fresh:
+                pass
+            else:
+                if last_received_time is None and (now - start_time) < STATE_TIMEOUT:
+                    status_lines.append(("Connecting...", CONNECTING_COLOR))
+                else:
+                    status_lines.append(("Not connected", DISCONNECTED_COLOR))
+                    if connect_error:
+                        status_lines.append((connect_error, DISCONNECTED_COLOR))
+            if warning_message:
+                status_lines.append((warning_message, WARNING_COLOR))
 
             write_text(draw, "Poisson Robot Control", (margin, header_y), title_font)
 
-            hint_y = warning_y + line_spacing if warning_message else header_y + title_gap
-            if warning_message:
-                write_text(draw, warning_message, (margin, warning_y), font, WARNING_COLOR)
+            hint_y = header_y + title_gap
+            for text, color in status_lines:
+                write_text(draw, text, (margin, hint_y), font, color)
+                hint_y += line_spacing
 
             draw_key_hint(draw, margin, hint_y, [pitch_down_key, pitch_up_key], "Pitch Down/Up", active_keys, font)
             hint_y += line_spacing
@@ -310,31 +403,47 @@ def main():
             draw_key_hint(draw, margin, hint_y, ["i"], "Invert flight mode", active_keys, font)
 
             stats_y = hint_y + line_spacing
-            write_text(draw, f"Roll: {int(round(roll))}", (margin, stats_y), font)
+            write_text(draw, f"State Roll: {int(round(display_roll))}", (margin, stats_y), font)
             stats_y += line_spacing
-            write_text(draw, f"Pitch: {int(round(pitch))}", (margin, stats_y), font)
+            write_text(draw, f"State Pitch: {int(round(display_pitch))}", (margin, stats_y), font)
             stats_y += line_spacing
-            write_text(draw, f"Yaw: {int(round(yaw))}", (margin, stats_y), font)
+            write_text(draw, f"State Yaw: {int(round(display_yaw))}", (margin, stats_y), font)
             stats_y += line_spacing
-            write_text(draw, f"Throttle: {int(round(throttle))}", (margin, stats_y), font)
-            
+            write_text(draw, f"State Throttle: {int(round(display_throttle))}", (margin, stats_y), font)
+
             footer_y = render_height - margin - 50
             write_text(draw, "ESC to exit", (margin, footer_y), font)
 
             img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
             # Push updated PWM values to the pi
-            msg = f"{roll:.2f},{pitch:.2f},{yaw:.2f},{throttle:.2f}".encode()
-            sock.sendto(msg, PI_ADDR)
+            if sock_connected:
+                try:
+                    sock.send(command_state.as_msg())
+                except OSError as exc:
+                    sock_connected = False
+                    connect_error = str(exc)
 
             # Hide opencv window decorations
             key = cv2.waitKey(1)
             if key == 27:
+                running = False
                 break
             cv2.imshow(window_name, img)
     finally:
+        running = False
         try:
-            sock.sendto(b"0.00,0.00,0.00,0.00", PI_ADDR)
+            if sock_connected:
+                sock.send(State().as_msg())
+        except OSError:
+            pass
+        try:
+            receiver_thread.join(timeout=0.5)
+        except RuntimeError:
+            pass
+
+        try:
+            sock.close()
         except OSError:
             pass
 
@@ -355,11 +464,4 @@ TODO:
 - g meter?
 - flight director / nav ball
 - compass / tape
-
-I want to have multiple guages, each of them is drawn in a function, the first parameter is (x, y) and second parameter is radius an everything should be scaled to that.
-
-rename draw_heading to draw_legacy_gauge, 
-Add another gauge on the right side for attitude control, with artificial horizon
-
-I like the cessna style gauges
 """
