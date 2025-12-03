@@ -14,11 +14,13 @@ Enter => stop all movement
 
 import time
 from threading import Lock
+import glob
+import os
 
 import cv2
 import numpy as np
 from pynput import keyboard
-import pigpio  # pigpiod daemon needed on the Pi for GPIO output
+from periphery import PWM  # Kernel PWM via /dev/pwmchip*
 
 FONT = cv2.FONT_HERSHEY_DUPLEX
 FONT_SCALE = 1
@@ -26,17 +28,19 @@ FONT_THICKNESS = 1
 WHITE = (255, 255, 255)
 ACTIVE_COLOR = (0, 200, 0)
 
-LEFT_PIN = 17
-RIGHT_PIN = 27
-MOTOR_PIN = 22
-PWM_FREQUENCY = 50  # Hz, typical for servos/ESCs
+LEFT_CHIP = 1
+RIGHT_CHIP = 2
+MIDDLE_CHIP = 3
+MOTOR_CHIP = 0
+
+PWM_FREQUENCY = 50
+PWM_PERIOD_US = 1_000_000 / PWM_FREQUENCY
 
 
 def clamp(value, min_value, max_value):
     return max(min_value, min(max_value, value))
 
 def write_text(img, text, position, color=WHITE):
-    cv2.putText(img, text, position, FONT, FONT_SCALE, color, FONT_THICKNESS, cv2.LINE_4)
     cv2.putText(img, text, position, cv2.FONT_HERSHEY_DUPLEX, 1, color, 1, cv2.LINE_4)
 
 def draw_key_hint(img, x, y, keys, description, active_keys):
@@ -78,6 +82,7 @@ def draw_heading(img, x, y, dx, dy, speed):
 def main():
     window_name = "Poisson Robot Control"
     cv2.namedWindow(window_name)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     pitch = 0.0 # -100 to 100
     roll = 0.0 # -100 to 100
@@ -162,21 +167,19 @@ def main():
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
-    pi = None
+    pwm_left = pwm_right = pwm_motor = None
     try:
+        available_chips = list_pwm_chips()
+        
+        pwm_left = PWM(LEFT_CHIP, 0)   # Expected on GPIO 17 with dtoverlay=rpi-rp1-pwm0,pin=17
+        pwm_right = PWM(RIGHT_CHIP, 0) # Expected on GPIO 27 with dtoverlay=rpi-rp1-pwm1,pin=27
+        pwm_middle = PWM(MIDDLE_CHIP, 0) # Expected on GPIO 22 with dtoverlay=rpi-rp1-pwm2,pin=22
+        pwm_motor = PWM(MOTOR_CHIP, 0) # Expected on GPIO 18 with dtoverlay=rpi-rp1-pwm3,pin=18
 
-        pi = pigpio.pi()
-        if not pi.connected:
-            raise RuntimeError("pigpio daemon not running; start it with 'sudo systemctl enable --now pigpiod'.")
-
-        for pin in (LEFT_PIN, RIGHT_PIN, MOTOR_PIN):
-            pi.set_mode(pin, pigpio.OUTPUT)
-            pi.set_PWM_frequency(pin, PWM_FREQUENCY)
-
-        # Safe neutral on start
-        pi.set_servo_pulsewidth(LEFT_PIN, 1500)
-        pi.set_servo_pulsewidth(RIGHT_PIN, 1500)
-        pi.set_servo_pulsewidth(MOTOR_PIN, 1500)
+        for dev in (pwm_left, pwm_right, pwm_middle, pwm_motor):
+            dev.frequency = PWM_FREQUENCY
+            dev.duty_cycle = 0.075  # 1.5 ms / 20 ms neutral
+            dev.enable()
 
         prev_time = time.time()
 
@@ -261,26 +264,26 @@ def main():
             write_text(img, "ESC to exit", (10, 710))
 
             # Push updated PWM values to the pins
-            pi.set_servo_pulsewidth(LEFT_PIN, left_pwm)
-            pi.set_servo_pulsewidth(RIGHT_PIN, right_pwm)
-            pi.set_servo_pulsewidth(MOTOR_PIN, motor_pwm)
+            pwm_left.duty_cycle = left_pwm / PWM_PERIOD_US
+            pwm_right.duty_cycle = right_pwm / PWM_PERIOD_US
+            pwm_middle.duty_cycle = motor_pwm / PWM_PERIOD_US
+            pwm_motor.duty_cycle = motor_pwm / PWM_PERIOD_US
 
             # Hide opencv window decorations
             key = cv2.waitKey(1)
             if key == 27:
                 break
-            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             cv2.imshow(window_name, img)
 
     finally:
         listener.stop()
         listener.join()
-        if pi:
-            # Stop pulses and release pigpio
-            pi.set_servo_pulsewidth(LEFT_PIN, 0)
-            pi.set_servo_pulsewidth(RIGHT_PIN, 0)
-            pi.set_servo_pulsewidth(MOTOR_PIN, 0)
-            pi.stop()
+        for dev in (pwm_left, pwm_right, pwm_middle, pwm_motor):
+            if dev:
+                try:
+                    dev.disable()
+                finally:
+                    dev.close()
         cv2.destroyWindow(window_name)
 
 
