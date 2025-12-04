@@ -1,7 +1,32 @@
+import math
 import struct
+import threading
 import time
+from dataclasses import dataclass
+from typing import Optional
+
+from scipy.spatial.transform import Rotation as R
 
 from periphery import I2C
+
+
+@dataclass
+class ImuState:
+    ax: float
+    ay: float
+    az: float
+    gx: float
+    gy: float
+    gz: float
+    temp_c: float
+    roll: float
+    pitch: float
+    yaw: float
+    timestamp: float
+
+    def as_msg(self, throttle: float = 0.0) -> bytes:
+        qx, qy, qz, qw = R.from_euler("xyz", [self.roll, self.pitch, self.yaw], degrees=True).as_quat()
+        return f"{qx:.6f},{qy:.6f},{qz:.6f},{qw:.6f},{throttle:.2f}".encode()
 
 
 class MPU6050:
@@ -16,13 +41,38 @@ class MPU6050:
     ACCEL_CONFIG = 0x1C
     ACCEL_XOUT_H = 0x3B
 
-    def __init__(self, i2c_bus="/dev/i2c-1", address=ADDRESS):
+    def __init__(
+        self,
+        i2c_bus="/dev/i2c-1",
+        address=ADDRESS,
+        on_update=None,
+        connection=None,
+        poll_interval: float = 0.05,
+    ):
         self.address = None
         self.i2c = I2C(i2c_bus)
         self.address = address
+
+        self._on_update = on_update
+        self._connection = connection
+        self._poll_interval = poll_interval
+
+        self._stop_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._state: Optional[ImuState] = None
+        self._thread: Optional[threading.Thread] = None
+
         self._configure()
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
 
     def close(self):
+        self._stop_event.set()
+        try:
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=1.0)
+        except RuntimeError:
+            pass
         if self.i2c:
             self.i2c.close()
 
@@ -65,3 +115,66 @@ class MPU6050:
         temp_c = (temp_raw / 340.0) + 36.53
 
         return ax, ay, az, gx, gy, gz, temp_c
+
+    def _monitor_loop(self):
+        roll = 0.0
+        pitch = 0.0
+        yaw = 0.0
+        alpha = 0.96  # complementary filter weight
+        last_time = time.monotonic()
+
+        while not self._stop_event.is_set():
+            try:
+                ax, ay, az, gx, gy, gz, temp_c = self.read_scaled()
+            except Exception as exc:
+                print(f"IMU read failed: {exc}")
+                self._stop_event.wait(self._poll_interval)
+                continue
+
+            now = time.monotonic()
+            dt = max(now - last_time, 1e-3)
+            last_time = now
+
+            roll_acc = math.degrees(math.atan2(ay, az))
+            pitch_acc = math.degrees(math.atan2(-ax, math.sqrt((ay * ay) + (az * az))))
+
+            roll = (alpha * (roll + gx * dt)) + ((1 - alpha) * roll_acc)
+            pitch = (alpha * (pitch + gy * dt)) + ((1 - alpha) * pitch_acc)
+            yaw += gz * dt
+
+            wrapped_yaw = self._wrap_yaw(yaw)
+
+            state = ImuState(
+                ax=ax,
+                ay=ay,
+                az=az,
+                gx=gx,
+                gy=gy,
+                gz=gz,
+                temp_c=temp_c,
+                roll=roll,
+                pitch=pitch,
+                yaw=wrapped_yaw,
+                timestamp=now,
+            )
+
+            with self._state_lock:
+                self._state = state
+
+            if self._connection:
+                self._connection.send_state(state)
+
+            if self._on_update:
+                self._on_update()
+
+            self._stop_event.wait(self._poll_interval)
+
+    @staticmethod
+    def _wrap_yaw(yaw: float) -> float:
+        if yaw > 180.0 or yaw < -180.0:
+            return ((yaw + 180.0) % 360.0) - 180.0
+        return yaw
+
+    def get_state(self) -> Optional[ImuState]:
+        with self._state_lock:
+            return self._state
