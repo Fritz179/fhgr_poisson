@@ -1,6 +1,7 @@
 import time
 
 from periphery import PWM
+from scipy.spatial.transform import Rotation as R
 
 from .connection import Connection
 from .mpu6050 import MPU6050
@@ -44,8 +45,12 @@ def main():
             print("No command or state available yet.")
             return
 
+        imu_roll, imu_pitch, imu_yaw = R.from_quat(state.quat).as_euler("xyz", degrees=True)
+        if imu_yaw > 180.0 or imu_yaw < -180.0:
+            imu_yaw = ((imu_yaw + 180.0) % 360.0) - 180.0
+
         print(
-            f"IMU roll={state.roll:.2f}, pitch={state.pitch:.2f}, yaw={state.yaw:.2f} | "
+            f"IMU roll={imu_roll:.2f}, pitch={imu_pitch:.2f}, yaw={imu_yaw:.2f} | "
             f"cmd roll={command.roll:.2f}, pitch={command.pitch:.2f}, "
             f"yaw={command.yaw:.2f}, throttle={command.throttle:.2f}"
         )

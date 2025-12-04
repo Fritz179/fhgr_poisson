@@ -12,6 +12,9 @@ THROTTLE_LIMIT = 100.0
 class State:
     quat: tuple = (0.0, 0.0, 0.0, 1.0)  # x, y, z, w
     throttle: float = 0.0  # -100 to 100
+    accel: tuple = (0.0, 0.0, 0.0)
+    gyro: tuple = (0.0, 0.0, 0.0)
+    temp_c: float = 0.0
 
     def as_msg(self) -> bytes:
         qx, qy, qz, qw = self.quat
@@ -30,27 +33,35 @@ class Connection:
         self.sock_connected = False
         self.connect_error: Optional[str] = None
         self.last_connect_attempt = 0.0
+        self.next_connect_time = 0.0
         self.last_received_time: Optional[float] = None
         self.display_state = State()
         self.running = True
-
+        self.pending_state: Optional[State] = None
+        self.last_sent_state: Optional[State] = None
+        
         self._receiver = Thread(target=self._receive_loop, daemon=True)
         self._receiver.start()
+        self._sender = Thread(target=self._send_loop, daemon=True)
+        self._sender.start()
 
-    def _ensure_connected(self, force=False):
+    def _ensure_connected(self):
         now = time.time()
-        if self.sock_connected and not force:
+        if self.sock_connected:
             return
-        if not force and (now - self.last_connect_attempt) < 1.0:
+        if now < self.next_connect_time or (now - self.last_connect_attempt) < 1.0:
             return
         self.last_connect_attempt = now
         try:
             self.sock.connect(self.addr)
             self.sock_connected = True
             self.connect_error = None
+            self.next_connect_time = now
         except OSError as exc:
             self.sock_connected = False
             self.connect_error = str(exc)
+            # Back off further attempts to avoid busy errors
+            self.next_connect_time = now + 5.0
 
     def _receive_loop(self):
         while self.running:
@@ -68,13 +79,16 @@ class Connection:
                 continue
 
             try:
-                qx, qy, qz, qw, t = [float(x) for x in data.decode().split(",")]
+                qx, qy, qz, qw, ax, ay, az, gx, gy, gz, temp_c, t = [float(x) for x in data.decode().split(",")]
             except ValueError:
                 continue
 
             self.display_state = State(
-                (qx, qy, qz, qw),
-                max(-THROTTLE_LIMIT, min(THROTTLE_LIMIT, t)),
+                quat=(qx, qy, qz, qw),
+                throttle=max(-THROTTLE_LIMIT, min(THROTTLE_LIMIT, t)),
+                accel=(ax, ay, az),
+                gyro=(gx, gy, gz),
+                temp_c=temp_c,
             )
             self.last_received_time = time.time()
 
@@ -82,13 +96,22 @@ class Connection:
         return self.display_state, self.last_received_time, self.connect_error, self.sock_connected
 
     def set_command(self, state: State):
-        if not self.sock_connected:
-            return
-        try:
-            self.sock.send(state.as_msg())
-        except OSError as exc:
-            self.sock_connected = False
-            self.connect_error = str(exc)
+        # Stash latest command; sender thread will transmit when connected
+        self.pending_state = state
+
+    def _send_loop(self):
+        while self.running:
+            if self.pending_state is not None and self.pending_state != self.last_sent_state:
+                if not self.sock_connected:
+                    self._ensure_connected()
+                if self.sock_connected:
+                    try:
+                        self.sock.send(self.pending_state.as_msg())
+                        self.last_sent_state = self.pending_state
+                    except OSError as exc:
+                        self.sock_connected = False
+                        self.connect_error = str(exc)
+            time.sleep(0.02)
 
     def close(self):
         self.running = False
@@ -98,6 +121,10 @@ class Connection:
             pass
         try:
             self._receiver.join(timeout=0.5)
+        except RuntimeError:
+            pass
+        try:
+            self._sender.join(timeout=0.5)
         except RuntimeError:
             pass
         try:

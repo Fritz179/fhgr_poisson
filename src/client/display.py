@@ -1,9 +1,11 @@
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from scipy.spatial.transform import Rotation as R
 
-from .gauges import draw_attitude_indicator, draw_compass, draw_legacy_gauge
+from .connection import State
+from .fonts import load_font
+from .gauges import draw_attitude_indicator, draw_compass, draw_legacy_gauge, draw_thermometer
 
 WHITE = (255, 255, 255)
 ACTIVE_COLOR = (0, 200, 0)
@@ -14,13 +16,6 @@ DISCONNECTED_COLOR = (255, 64, 64)
 TEXT_SIZE = 40
 WIDTH = 3408
 HEIGHT = 2130
-
-
-def load_font(size: int):
-    try:
-        return ImageFont.truetype("DejaVuSans.ttf", size)
-    except (OSError, IOError):
-        return ImageFont.load_default()
 
 
 def text_width(draw: ImageDraw.ImageDraw, text: str, font) -> int:
@@ -111,17 +106,31 @@ def render_frame(
     display_pitch = pitch
     display_yaw = yaw
     display_throttle = display_state.throttle
+    display_temp = display_state.temp_c
 
     img = np.zeros((render_height, render_width, 3), dtype=np.uint8)
 
-    gauge_radius = max(60, int(min(render_width, render_height) * 0.16))
-    legacy_center = (int(render_width * 0.25), render_height // 2)
-    attitude_center = (render_width // 2, render_height // 2)
-    compass_center = (int(render_width * 0.75), render_height // 2)
+    gauge_radius = max(60, int(min(render_width, render_height) * 0.18))
+    left_x = int(render_width * 0.25)
+    right_x = int(render_width * 0.75)
+    top_y = int(render_height * 0.35)
+    bottom_y = int(render_height * 0.75)
+
+    legacy_center = (left_x, top_y)
+    attitude_center = (right_x, top_y)
+    compass_center = (left_x, bottom_y)
+    thermo_center = (right_x, bottom_y)
 
     draw_legacy_gauge(legacy_center, gauge_radius, img, rot, display_throttle)
     draw_attitude_indicator(attitude_center, gauge_radius, img, rot)
     draw_compass(compass_center, gauge_radius, img, rot)
+
+    # Thermometer occupies bottom-right cell
+    thermo_width = int(gauge_radius * 0.3)
+    thermo_height = int(gauge_radius * 1.6)
+    thermo_x = thermo_center[0] - thermo_width // 2
+    thermo_y = thermo_center[1] - thermo_height // 2
+    draw_thermometer((thermo_x, thermo_y), thermo_width, thermo_height, img, display_temp)
 
     pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil_img)
@@ -156,6 +165,8 @@ def render_frame(
     draw.text((margin, stats_y), f"State Yaw: {int(round(display_yaw))}", font=font, fill=WHITE)
     stats_y += line_spacing
     draw.text((margin, stats_y), f"State Throttle: {int(round(display_throttle))}", font=font, fill=WHITE)
+    stats_y += line_spacing
+    draw.text((margin, stats_y), f"Temp: {display_temp:.1f} °C", font=font, fill=WHITE)
 
     footer_y = render_height - margin - 50
     draw.text((margin, footer_y), "ESC to exit", font=font, fill=WHITE)
@@ -167,6 +178,7 @@ class Display:
     def __init__(self, state_timeout: float, start_time: float):
         self.state_timeout = state_timeout
         self.start_time = start_time
+        self.fallback_temp = 0.0
         screen_width, screen_height = detect_screen_size()
         self.render_width, self.render_height, self.scale, self.warning_message = compute_render_geometry(
             screen_width, screen_height
@@ -175,10 +187,27 @@ class Display:
     def render(self, target_state, connection, active_keys, now):
         received_state, last_received_time, connect_error, sock_connected = connection.get_state()
         rx_fresh = last_received_time is not None and (now - last_received_time) <= self.state_timeout
-        display_state = received_state if rx_fresh else target_state
+        if rx_fresh:
+            display_state = received_state
+            self.fallback_temp = display_state.temp_c
+        else:
+            # Simulate temperature drift when we have no telemetry
+            self.fallback_temp += 0.1
+            display_state = State(
+                quat=target_state.quat,
+                throttle=target_state.throttle,
+                accel=target_state.accel,
+                gyro=target_state.gyro,
+                temp_c=self.fallback_temp,
+            )
 
         status_lines = []
-        if not rx_fresh:
+        if sock_connected:
+            if not rx_fresh:
+                status_lines.append(("Connected (no data yet)", CONNECTING_COLOR))
+            if connect_error:
+                status_lines.append((connect_error, WARNING_COLOR))
+        else:
             if last_received_time is None and (now - self.start_time) < self.state_timeout:
                 status_lines.append(("Connecting...", CONNECTING_COLOR))
             else:

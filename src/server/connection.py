@@ -88,7 +88,7 @@ class Connection:
             return
 
         try:
-            payload = state.as_msg(throttle) if hasattr(state, "as_msg") else str(state).encode()
+            payload = state.as_msg(throttle)
             self.sock.sendto(payload, target)
         except OSError as exc:
             print(f"Failed to send state to {target}: {exc}")

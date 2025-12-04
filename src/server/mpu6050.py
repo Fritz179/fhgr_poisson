@@ -12,6 +12,7 @@ from periphery import I2C
 
 @dataclass
 class ImuState:
+    quat: tuple
     ax: float
     ay: float
     az: float
@@ -19,14 +20,16 @@ class ImuState:
     gy: float
     gz: float
     temp_c: float
-    roll: float
-    pitch: float
-    yaw: float
     timestamp: float
 
     def as_msg(self, throttle: float = 0.0) -> bytes:
-        qx, qy, qz, qw = R.from_euler("xyz", [self.roll, self.pitch, self.yaw], degrees=True).as_quat()
-        return f"{qx:.6f},{qy:.6f},{qz:.6f},{qw:.6f},{throttle:.2f}".encode()
+        qx, qy, qz, qw = self.quat
+        return (
+            f"{qx:.6f},{qy:.6f},{qz:.6f},{qw:.6f},"
+            f"{self.ax:.4f},{self.ay:.4f},{self.az:.4f},"
+            f"{self.gx:.4f},{self.gy:.4f},{self.gz:.4f},"
+            f"{self.temp_c:.2f},{throttle:.2f}"
+        ).encode()
 
 
 class MPU6050:
@@ -120,6 +123,7 @@ class MPU6050:
         roll = 0.0
         pitch = 0.0
         yaw = 0.0
+        orientation = R.identity()
         alpha = 0.96  # complementary filter weight
         last_time = time.monotonic()
 
@@ -135,16 +139,24 @@ class MPU6050:
             dt = max(now - last_time, 1e-3)
             last_time = now
 
+            # Integrate gyro rates into the quaternion (body-frame)
+            delta_rot = R.from_euler("xyz", [gx * dt, gy * dt, gz * dt], degrees=True)
+            orientation = orientation * delta_rot
+
             roll_acc = math.degrees(math.atan2(ay, az))
             pitch_acc = math.degrees(math.atan2(-ax, math.sqrt((ay * ay) + (az * az))))
 
-            roll = (alpha * (roll + gx * dt)) + ((1 - alpha) * roll_acc)
-            pitch = (alpha * (pitch + gy * dt)) + ((1 - alpha) * pitch_acc)
-            yaw += gz * dt
-
+            # Blend gyro-integrated attitude with accelerometer reference for roll/pitch
+            est_roll, est_pitch, est_yaw = orientation.as_euler("xyz", degrees=True)
+            roll = (alpha * est_roll) + ((1 - alpha) * roll_acc)
+            pitch = (alpha * est_pitch) + ((1 - alpha) * pitch_acc)
+            yaw = est_yaw
             wrapped_yaw = self._wrap_yaw(yaw)
 
+            orientation = R.from_euler("xyz", [roll, pitch, wrapped_yaw], degrees=True)
+
             state = ImuState(
+                quat=orientation.as_quat(),
                 ax=ax,
                 ay=ay,
                 az=az,
@@ -152,9 +164,6 @@ class MPU6050:
                 gy=gy,
                 gz=gz,
                 temp_c=temp_c,
-                roll=roll,
-                pitch=pitch,
-                yaw=wrapped_yaw,
                 timestamp=now,
             )
 

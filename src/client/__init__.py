@@ -53,6 +53,8 @@ def main():
 
             with keys_lock:
                 pressed_keys.add(" ")
+                # Also reset throttle
+                throttle = 0.0
             return
 
         if key == keyboard.Key.esc:
@@ -187,3 +189,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+- attitude, artificial horizon
+- Slip/skid ball
+- turn needle
+- vertical speed
+- speedometer / throttle bars
+- g meter?
+- flight director / nav ball
+- compass / tape
+"""
