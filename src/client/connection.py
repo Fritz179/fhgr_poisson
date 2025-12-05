@@ -6,19 +6,27 @@ from typing import Optional
 
 from scipy.spatial.transform import Rotation as R
 
-THROTTLE_LIMIT = 100.0
+THROTTLE_LIMIT = 1.0
 
 @dataclass
 class State:
     quat: tuple = (0.0, 0.0, 0.0, 1.0)  # x, y, z, w
-    throttle: float = 0.0  # -100 to 100
+    throttle: float = 0.0  # -1 to 1
     accel: tuple = (0.0, 0.0, 0.0)
     gyro: tuple = (0.0, 0.0, 0.0)
     temp_c: float = 0.0
+    selected_pid: int = 0
+    pid_values: tuple = ((1 / 90, 1 / 90, 1 / 90), (1.0, 1.0, 1.0), (1.0, 1.0, 1.0))
 
     def as_msg(self) -> bytes:
         qx, qy, qz, qw = self.quat
-        return f"{qx:.6f},{qy:.6f},{qz:.6f},{qw:.6f},{self.throttle:.2f}".encode()
+        flat_pids = ",".join(f"{v:.6f}" for v in self.pid_values[self.selected_pid])
+        return (
+            f"{qx:.6f},{qy:.6f},{qz:.6f},{qw:.6f},"
+            f"{self.throttle:.2f},"
+            f"{self.selected_pid},"
+            f"{flat_pids}"
+        ).encode()
 
     @staticmethod
     def from_rotation(rot: R, throttle: float):
@@ -78,17 +86,28 @@ class Connection:
                 self.connect_error = str(exc)
                 continue
 
+            parts = data.decode().split(",")
             try:
-                qx, qy, qz, qw, ax, ay, az, gx, gy, gz, temp_c, t = [float(x) for x in data.decode().split(",")]
+                floats = [float(x) for x in parts[:13]]
             except ValueError:
                 continue
+            if len(floats) < 13:
+                continue
+            qx, qy, qz, qw, ax, ay, az, gx, gy, gz, temp_c, throttle_val = floats[:12]
+            sel_pid = self.display_state.selected_pid
+            if len(parts) >= 13:
+                try:
+                    sel_pid = int(float(parts[12]))
+                except ValueError:
+                    sel_pid = self.display_state.selected_pid
 
             self.display_state = State(
                 quat=(qx, qy, qz, qw),
-                throttle=max(-THROTTLE_LIMIT, min(THROTTLE_LIMIT, t)),
+                throttle=max(-THROTTLE_LIMIT, min(THROTTLE_LIMIT, throttle_val)),
                 accel=(ax, ay, az),
                 gyro=(gx, gy, gz),
                 temp_c=temp_c,
+                selected_pid=sel_pid,
             )
             self.last_received_time = time.time()
 

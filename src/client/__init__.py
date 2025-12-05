@@ -6,7 +6,6 @@ import time
 from threading import Lock
 import cv2
 from pynput import keyboard
-import math
 from scipy.spatial.transform import Rotation as R
 
 from .connection import Connection, State, THROTTLE_LIMIT
@@ -35,8 +34,10 @@ def main():
 
     direction_rate = 90.0  # deg/s while holding W/A/S/D
     yaw_rate = 60.0  # deg/s while holding Q/E
-    throttle_rate = 60.0  # units per second while holding Shift/Ctrl
-    fine_throttle_rate = 20.0  # units per second while holding R/F
+    throttle_rate = 1.0  # units per second while holding Shift/Ctrl
+    fine_throttle_rate = 0.3  # units per second while holding R/F
+    pid_selection = 0  # 0=NO_PID,1=FAB_PID,2=YRK_PID
+    pid_values = [[1 / 90, 1 / 90, 1 / 90], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
     keys_lock = Lock()
     pressed_keys = set()
     running = True
@@ -44,7 +45,7 @@ def main():
     ctrl_keys = {key for key in (getattr(keyboard.Key, "ctrl", None), getattr(keyboard.Key, "ctrl_r", None), getattr(keyboard.Key, "ctrl_l", None)) if key is not None}
 
     def on_press(key):
-        nonlocal throttle, orientation, running
+        nonlocal throttle, orientation, running, pid_selection
 
         if key == keyboard.Key.space:
             # Reset attitude only
@@ -73,6 +74,32 @@ def main():
         try:
             char = key.char.lower()
         except AttributeError:
+            return
+
+        if char in {"0", "1", "2"}:
+            pid_selection = int(char)
+            return
+
+        # PID tuning keys (only for selected PID)
+        factor_up = 1.1
+        factor_down = 0.9
+        if char == "o":  # P up
+            pid_values[pid_selection][0] *= factor_up
+            return
+        if char == "p":  # P down
+            pid_values[pid_selection][0] *= factor_down
+            return
+        if char == "k":  # I down
+            pid_values[pid_selection][1] *= factor_down
+            return
+        if char == "l":  # I up
+            pid_values[pid_selection][1] *= factor_up
+            return
+        if char == "n":  # D down
+            pid_values[pid_selection][2] *= factor_down
+            return
+        if char == "m":  # D up
+            pid_values[pid_selection][2] *= factor_up
             return
 
         pressed_keys.add(char)
@@ -161,7 +188,15 @@ def main():
 
             throttle = clamp(throttle, -THROTTLE_LIMIT, THROTTLE_LIMIT)
 
-            target_state = State.from_rotation(orientation, throttle)
+            target_state = State(
+                quat=tuple(orientation.as_quat()),
+                throttle=throttle,
+                accel=(0.0, 0.0, 0.0),
+                gyro=(0.0, 0.0, 0.0),
+                temp_c=0.0,
+                selected_pid=pid_selection,
+                pid_values=tuple(tuple(row) for row in pid_values),
+            )
 
             now = time.time()
 
@@ -170,6 +205,7 @@ def main():
                 connection=connection,
                 active_keys=active_keys,
                 now=now,
+                selected_pid=pid_selection,
             )
 
             connection.set_command(target_state)
