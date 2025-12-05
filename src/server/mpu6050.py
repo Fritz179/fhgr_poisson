@@ -12,7 +12,7 @@ from periphery import I2C
 
 @dataclass
 class ImuState:
-    quat: tuple
+    quat: R
     ax: float
     ay: float
     az: float
@@ -21,9 +21,10 @@ class ImuState:
     gz: float
     temp_c: float
     timestamp: float
+    dt: float
 
     def as_msg(self, throttle: float = 0.0) -> bytes:
-        qx, qy, qz, qw = self.quat
+        qx, qy, qz, qw = self.quat.as_quat()
         return (
             f"{qx:.6f},{qy:.6f},{qz:.6f},{qw:.6f},"
             f"{self.ax:.4f},{self.ay:.4f},{self.az:.4f},"
@@ -156,7 +157,7 @@ class MPU6050:
             orientation = R.from_euler("xyz", [roll, pitch, wrapped_yaw], degrees=True)
 
             state = ImuState(
-                quat=orientation.as_quat(),
+                quat=orientation,
                 ax=ax,
                 ay=ay,
                 az=az,
@@ -165,6 +166,7 @@ class MPU6050:
                 gz=gz,
                 temp_c=temp_c,
                 timestamp=now,
+                dt=dt,
             )
 
             with self._state_lock:

@@ -17,7 +17,11 @@ class Command:
     roll: float
     pitch: float
     yaw: float
+    quat: R
     throttle: float
+
+    pid_selection: int
+    pid_data: list[float]
 
 
 class Connection:
@@ -60,10 +64,10 @@ class Connection:
                 self._on_command()
 
     def _parse_command(self, data: bytes) -> Command:
-        try:
-            qx, qy, qz, qw, throttle = [float(x) for x in data.decode().split(",")]
-        except ValueError as exc:
-            raise ValueError(f"Malformed command payload: {exc}")
+        print(data)
+        values = [float(x) for x in data.decode().split(",")]
+        qx, qy, qz, qw, throttle, pid_selection = values[0:6]
+        p, i, d = values[6:]
 
         rot = R.from_quat([qx, qy, qz, qw])
         roll, pitch, yaw = rot.as_euler("xyz", degrees=True)
@@ -73,7 +77,7 @@ class Connection:
             yaw = ((yaw + 180.0) % 360.0) - 180.0
 
         throttle = clamp(throttle, -THROTTLE_LIMIT, THROTTLE_LIMIT)
-        return Command(roll, pitch, yaw, throttle)
+        return Command(roll, pitch, yaw, rot, throttle, int(pid_selection), (p, i, d))
 
     def get_latest(self) -> Optional[Command]:
         with self._lock:
