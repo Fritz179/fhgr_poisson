@@ -37,20 +37,28 @@ def main():
     throttle_rate = 1.0  # units per second while holding Shift/Ctrl
     fine_throttle_rate = 0.3  # units per second while holding R/F
     pid_selection = 0  # 0=NO_PID,1=FAB_PID,2=YRK_PID
-    pid_values = [[1 / 90, 1 / 90, 1 / 90], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
+    pid_values = [
+        [1 / 90, 1 / 90, 1 / 90], # CMD
+        [1 / 40, 1 / 40, 1 / 90], # Fabrizio
+        [1 / 90, 1 / 90, 1 / 90], # York
+    ]
     keys_lock = Lock()
     pressed_keys = set()
     running = True
     shift_keys = {keyboard.Key.shift, keyboard.Key.shift_r, keyboard.Key.shift_l}
     ctrl_keys = {key for key in (getattr(keyboard.Key, "ctrl", None), getattr(keyboard.Key, "ctrl_r", None), getattr(keyboard.Key, "ctrl_l", None)) if key is not None}
+    frame_times = []
 
     def on_press(key):
         nonlocal throttle, orientation, running, pid_selection
 
         if key == keyboard.Key.space:
             # Reset attitude only
-            yaw_keep = orientation.as_euler("xyz", degrees=True)[2]
-            orientation = R.from_euler("xyz", [0.0, 0.0, yaw_keep], degrees=True)
+            yaw = 0
+            if display.prev_quat is not None:
+                yaw = R.from_quat(display.prev_quat).as_euler("xyz", degrees=True)[2]
+
+            orientation = R.from_euler("xyz", [0.0, 0.0, yaw], degrees=True)
 
             with keys_lock:
                 pressed_keys.add(" ")
@@ -198,14 +206,12 @@ def main():
                 pid_values=tuple(tuple(row) for row in pid_values),
             )
 
-            now = time.time()
-
             img, display_state = display.render(
                 target_state=target_state,
                 connection=connection,
                 active_keys=active_keys,
-                now=now,
                 selected_pid=pid_selection,
+                frame_times=frame_times.copy(),
             )
 
             connection.set_command(target_state)
@@ -216,6 +222,11 @@ def main():
                 running = False
                 break
             cv2.imshow(window_name, img)
+
+            loop_end = time.time()
+            frame_times.append(loop_end - current_time)
+            if len(frame_times) > 20:
+                frame_times.pop(0)
     finally:
         running = False
         connection.close()

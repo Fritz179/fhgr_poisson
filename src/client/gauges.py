@@ -11,7 +11,7 @@ PITCH_MAX = 90.0
 THROTTLE_MAX = 1.0
 YAW_MAX = 180.0
 TEMP_MIN = -10.0
-TEMP_MAX = 40.0
+TEMP_MAX = 50.0
 
 
 def clamp(value, min_value, max_value):
@@ -99,17 +99,20 @@ def draw_compass(center, radius, img, state: State):
 
 def draw_thermometer(center, radius, img, state: State):
     """Draw a simple vertical thermometer and digital readout. Returns bounding box (x, y, w, h)."""
-    w = max(20, int(radius * 0.6))
+    base_w = max(20, int(radius * 0.6))
     h = max(80, int(radius * 1.8))
+    tick_space = max(int(base_w * 0.8), int(radius * 0.4), 20)
+    w = base_w + tick_space  # extra width to fit ticks/labels
     temp_c = state.temp_c
     text_pad = max(4, w // 6)
-    digital_font = load_font(max(10, int(w * 0.35)))
+    digital_font = load_font(max(8, int(w * 0.15)))
     text_extra = digital_font.size + text_pad
     overlay = np.zeros((h + text_extra, w, 3), dtype=np.uint8)
 
-    tube_width = max(4, int(w * 0.18))  # thinner tube
-    bulb_radius = max(tube_width, w // 4)  # smaller bulb
-    tube_x1 = (w - tube_width) // 2
+    tube_width = max(4, int(base_w * 0.18))  # thinner tube
+    bulb_radius = max(tube_width, base_w // 4)  # smaller bulb
+    x_offset = tick_space // 2  # shift tube left to make room for ticks/labels on right
+    tube_x1 = x_offset + (base_w - tube_width) // 2
     tube_x2 = tube_x1 + tube_width
     tube_y1 = 0
     tube_y2 = h - bulb_radius
@@ -127,36 +130,36 @@ def draw_thermometer(center, radius, img, state: State):
     cv2.circle(overlay, bulb_center, bulb_radius, (200, 200, 200), 2, cv2.LINE_AA)
     cv2.circle(overlay, bulb_center, bulb_radius - 3, fill_color, -1, cv2.LINE_AA)
 
-    major_tick_len = max(6, int(w * 0.25))
-    minor_tick_len = max(2, int(major_tick_len * 0.5))
-    tick_x1 = tube_x2 + 1  # attach just to the tube's right edge
+    major_tick_len = max(4, int(base_w * 0.2))
+    minor_tick_len = max(2, int(major_tick_len * 0.4))
+    tick_x1 = tube_x2  # flush with tube edge
     tick_x2 = tick_x1 + major_tick_len
     tick_x1_minor = tick_x1
     tick_x2_minor = tick_x1 + minor_tick_len
-    tick_thickness = max(1, w // 16)
+    tick_thickness = max(1, base_w // 18)
     span = (TEMP_MAX - TEMP_MIN)
 
-    label_font = load_font(max(8, int(w * 0.25)))
+    label_font = load_font(max(6, int(base_w * 0.15)))
     pil_img = Image.fromarray(overlay)
     draw = ImageDraw.Draw(pil_img)
     t_vals = list(range(int(TEMP_MIN), int(TEMP_MAX) + 1, 10))
     for t in t_vals:
         ratio_t = (t - TEMP_MIN) / span
         y_tick = tube_y2 - int((tube_y2 - tube_y1) * ratio_t)
-        cv2.line(overlay, (tick_x1, y_tick), (tick_x2, y_tick), (180, 180, 180), tick_thickness, cv2.LINE_AA)
+        cv2.line(overlay, (tick_x1, y_tick), (tick_x2, y_tick), (220, 220, 220), tick_thickness, cv2.LINE_AA)
         label = f"{t:+}"
         bbox = draw.textbbox((0, 0), label, font=label_font)
         lbl_w = bbox[2] - bbox[0]
         lbl_h = bbox[3] - bbox[1]
-        lbl_x = tick_x2 + 3
+        lbl_x = tick_x2 + 1
         lbl_y = y_tick - lbl_h // 2
-        draw.text((lbl_x, lbl_y), label, font=label_font, fill=(200, 200, 200))
+        draw.text((lbl_x, lbl_y), label, font=label_font, fill=(180, 180, 180))
         # Minor tick at midpoint to next major
         mid_t = t + 5
         if mid_t <= TEMP_MAX:
             ratio_m = (mid_t - TEMP_MIN) / span
             y_mid = tube_y2 - int((tube_y2 - tube_y1) * ratio_m)
-            cv2.line(overlay, (tick_x1_minor, y_mid), (tick_x2_minor, y_mid), (150, 150, 150), max(1, tick_thickness - 1), cv2.LINE_AA)
+            cv2.line(overlay, (tick_x1_minor, y_mid), (tick_x2_minor, y_mid), (200, 200, 200), max(1, tick_thickness - 1), cv2.LINE_AA)
 
     temp_reading = f"{temp_c:.1f} C"
     bbox = draw.textbbox((0, 0), temp_reading, font=digital_font)
@@ -263,7 +266,7 @@ def draw_attitude_indicator(center, radius, img, state: State):
             draw.text(pos, label, font=font, fill=(255, 255, 255))
         overlay = np.array(pil_overlay)
 
-    roll_angle = clamp(roll, -ROLL_MAX, ROLL_MAX)
+    roll_angle = -clamp(roll, -ROLL_MAX, ROLL_MAX)
     rot_mat = cv2.getRotationMatrix2D((cx, cy), roll_angle, 1.0)
     rotated = cv2.warpAffine(
         overlay,

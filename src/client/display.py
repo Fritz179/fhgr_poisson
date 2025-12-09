@@ -6,7 +6,12 @@ from scipy.spatial.transform import Rotation as R
 
 from .connection import State
 from .fonts import load_font
-from .gauges import draw_attitude_indicator, draw_compass, draw_legacy_gauge, draw_thermometer
+from .gauges import (
+    draw_attitude_indicator,
+    draw_compass,
+    draw_legacy_gauge,
+    draw_thermometer,
+)
 
 WHITE = (255, 255, 255)
 ACTIVE_COLOR = (0, 200, 0)
@@ -99,6 +104,7 @@ def render_frame(
     active_keys,
     status_lines,
     selected_pid: int,
+    frame_times,
 ):
     font_size = max(8, int(round(TEXT_SIZE * scale * 0.5)))
     font = load_font(font_size)
@@ -124,16 +130,15 @@ def render_frame(
 
     size = min(half_width, half_height)
     margin = int(size * 0.02)
-    cell_size = (size - 2 * margin) / 3
+    cell_size = (size - 2 * margin) / 2
     radius = int(cell_size * 0.45)
-    grid_w = grid_h = cell_size * 3 + margin * 2
+    grid_w = grid_h = cell_size * 2 + margin * 2
     offset_x = int((half_width - grid_w / 3 * 2) / 2)
     offset_y = int((half_height - grid_h) / 2)
 
     panel = [
-        [draw_legacy_gauge, draw_attitude_indicator, draw_thermometer],
-        [draw_compass, draw_legacy_gauge, draw_legacy_gauge],
-        [draw_legacy_gauge, draw_legacy_gauge, draw_legacy_gauge],
+        [draw_legacy_gauge, draw_attitude_indicator],
+        [draw_compass, draw_thermometer],
     ]
 
     timings = []
@@ -197,6 +202,11 @@ def render_frame(
         pv = display_state.pid_values[sel]
         draw.text((margin, stats_y), f"PID Val: {pv[0]:.4f}, {pv[1]:.4f}, {pv[2]:.4f}", font=font, fill=WHITE)
         stats_y += line_spacing
+    if frame_times:
+        avg_ms = (sum(frame_times) / len(frame_times)) * 1000.0
+        fps = 1000.0 / avg_ms if avg_ms > 0 else 0.0
+        draw.text((margin, stats_y), f"Frame: {avg_ms:.1f} ms  FPS: {fps:.1f}", font=font, fill=WHITE)
+        stats_y += line_spacing
     draw.text((margin, stats_y), f"State Throttle: {display_throttle:.2f}", font=font, fill=WHITE)
     stats_y += line_spacing
     draw.text((margin, stats_y), f"Temp: {display_temp:.1f} °C", font=font, fill=WHITE)
@@ -222,11 +232,22 @@ class Display:
             screen_width, screen_height
         )
 
-    def render(self, target_state, connection, active_keys, now, selected_pid: int):
+    def render(self, target_state, connection, active_keys, selected_pid, frame_times):
         received_state, last_received_time, connect_error, sock_connected = connection.get_state()
+        
+        now = time.time()
         rx_fresh = last_received_time is not None and (now - last_received_time) <= self.state_timeout
         if rx_fresh:
-            display_state = received_state
+            # Merge telemetry with local PID selection/values (Pi does not echo them)
+            display_state = State(
+                quat=received_state.quat,
+                throttle=received_state.throttle,
+                accel=received_state.accel,
+                gyro=received_state.gyro,
+                temp_c=received_state.temp_c,
+                selected_pid=selected_pid,
+                pid_values=target_state.pid_values,
+            )
             self.fallback_temp = display_state.temp_c
             self.prev_quat = display_state.quat
             self.prev_time = now
@@ -282,5 +303,6 @@ class Display:
             active_keys,
             status_lines,
             selected_pid,
+            frame_times,
         )
         return img, display_state

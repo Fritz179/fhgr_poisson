@@ -91,15 +91,10 @@ class Connection:
                 floats = [float(x) for x in parts[:13]]
             except ValueError:
                 continue
-            if len(floats) < 13:
-                continue
             qx, qy, qz, qw, ax, ay, az, gx, gy, gz, temp_c, throttle_val = floats[:12]
+            
             sel_pid = self.display_state.selected_pid
-            if len(parts) >= 13:
-                try:
-                    sel_pid = int(float(parts[12]))
-                except ValueError:
-                    sel_pid = self.display_state.selected_pid
+            pid_vals = self.display_state.pid_values
 
             self.display_state = State(
                 quat=(qx, qy, qz, qw),
@@ -108,6 +103,7 @@ class Connection:
                 gyro=(gx, gy, gz),
                 temp_c=temp_c,
                 selected_pid=sel_pid,
+                pid_values=pid_vals,
             )
             self.last_received_time = time.time()
 
