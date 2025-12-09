@@ -9,6 +9,8 @@ from scipy.spatial.transform import Rotation as R
 
 from periphery import I2C
 
+# Rotation from IMU sensor frame into the robot frame. Adjust if the IMU is mounted differently.
+mounting_rotation = R.from_euler("xyz", [0, 180, 0], degrees=True).inv()
 
 @dataclass
 class ImuState:
@@ -103,19 +105,20 @@ class MPU6050:
         self._write_register(self.ACCEL_CONFIG, 0x00)
 
     def read_scaled(self):
-        """Return accel (g), gyro (deg/s), and temperature (C)."""
+        """Return accel (m/s^2), gyro (rad/s), and temperature (C)."""
         data = self._read_registers(self.ACCEL_XOUT_H, 14)
         ax_raw, ay_raw, az_raw, temp_raw, gx_raw, gy_raw, gz_raw = struct.unpack(">hhhhhhh", data)
 
         accel_scale = 16384.0  # LSB/g
         gyro_scale = 131.0  # LSB/(deg/s)
+        g = 9.80665
 
-        ax = ax_raw / accel_scale
-        ay = ay_raw / accel_scale
-        az = az_raw / accel_scale
-        gx = gx_raw / gyro_scale
-        gy = gy_raw / gyro_scale
-        gz = gz_raw / gyro_scale
+        ax = (ax_raw / accel_scale) * g
+        ay = (ay_raw / accel_scale) * g
+        az = (az_raw / accel_scale) * g
+        gx = (gx_raw / gyro_scale) * (math.pi / 180.0)
+        gy = (gy_raw / gyro_scale) * (math.pi / 180.0)
+        gz = (gz_raw / gyro_scale) * (math.pi / 180.0)
         temp_c = (temp_raw / 340.0) + 36.53
 
         return ax, ay, az, gx, gy, gz, temp_c
@@ -136,12 +139,15 @@ class MPU6050:
                 self._stop_event.wait(self._poll_interval)
                 continue
 
+            ax, ay, az = mounting_rotation.apply([ax, ay, az])
+            gx, gy, gz = mounting_rotation.apply([gx, gy, gz])
+
             now = time.monotonic()
             dt = max(now - last_time, 1e-3)
             last_time = now
 
-            # Integrate gyro rates into the quaternion (body-frame)
-            delta_rot = R.from_euler("xyz", [gx * dt, gy * dt, gz * dt], degrees=True)
+            # Integrate gyro rates (rad/s) into the quaternion (body-frame)
+            delta_rot = R.from_euler("xyz", [gx * dt, gy * dt, gz * dt], degrees=False)
             orientation = orientation * delta_rot
 
             roll_acc = math.degrees(math.atan2(ay, az))

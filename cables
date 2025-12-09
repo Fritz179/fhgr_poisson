@@ -4,3 +4,21 @@ GND
 
 ECS PWM
 Servos PWM x3
+
+
+3x1.5
+  GND => GND
+  L1  => 7.2V for Servos
+  N   => 14.8V for ECS Red
+
+4x1 MARKED
+  Black  => PWM Flap LEFT
+  Red    => PWM Middle
+  White  => PWM ESC Yellow
+  Yellow => PWM Flap Right
+
+4x1 UNMARKED for MPU6050
+  Black  => GND
+  Red    => 3.3V
+  White  => SDA Blue
+  Yellow => SCL Green

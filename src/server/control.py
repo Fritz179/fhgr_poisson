@@ -17,19 +17,34 @@ class Output:
     throttle: float
 
 def no_pid(state: ImuState, command: Command) -> Output:
-    left = command.pitch + command.roll
-    right = command.pitch - command.roll
-    middle = command.yaw
+    left = command.pitch - command.roll
+    right = command.pitch + command.roll
+    middle = -command.yaw
     throttle = command.throttle
 
     pl, pm, pr = command.pid_data
 
-    return Output(left * pl, middle * pm, right * pr, throttle)
+    # Right surface is mounted 180
+    return Output(left * pl, middle * pm, -right * pr, throttle)
 
 def fabrizio_pid(state: ImuState, command: Command) -> Output:
-    
-    return Output(0, 0, 0, 0)
+    error = state.quat.inv() * command.quat
+    roll, pitch, yaw = error.as_euler("xyz", degrees=True)
 
+    pp, pr, py = command.pid_data
+ 
+
+    left = pitch * pp + roll * pr
+    right = pitch * pp - roll * pr
+    middle = yaw * py
+    throttle = command.throttle
+
+    print(f"PID params: P_pitch={pp}, P_roll={pr}, P_yaw={py}\n"
+        f"Errors: roll={roll:.2f}, pitch={pitch:.2f}, yaw={yaw:.2f}\n"
+        f"OUT: left={left:.2f}, middle={middle:.2f}, right={right:.2f}\n")
+
+    # Right surface is mounted 180
+    return Output(left, middle, -right, throttle)
 
 x = 0
 vx = 0
